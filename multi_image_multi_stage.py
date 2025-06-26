@@ -10,18 +10,19 @@ import cv2 as cv
 import multi_stage as ms
 
 # Define folder names
-foldername = "new_cropped"
+foldername = "30 slices"
 
 def load_data(foldername):
     print("Reading .tiff files ...")
-    tiff_files = sorted(
-        [f for f in os.listdir(foldername) if f.endswith(".tiff") or f.endswith(".tif")]
+    tiff_files = natsort.natsorted(
+        [f for f in os.listdir(foldername) if f.endswith((".tiff", ".tif"))]
     )
     for file in tiff_files:
         images = iio.imread(os.path.join(foldername, file))
         filtered_images = ms.multi_stage(images)
         labeled, num_features = connected_components_3d(filtered_images)
         print(f"{file}: {num_features} nuclei")
+        #print(num_features)
     return iio.imread(os.path.join(foldername, tiff_files[1]))
 
 

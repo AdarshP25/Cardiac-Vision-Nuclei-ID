@@ -5,12 +5,13 @@ import tifffile as tiff
 from numba import njit, prange
 from math import sqrt
 import scipy.ndimage
+from skimage import filters, feature, morphology, measure, segmentation, exposure
 import natsort
 import cv2 as cv
 import draw_contours as dc
 
 # Define folder names
-foldername = "9_slices"
+foldername = "indiv_slices_10"
 
 def load_data(foldername):
     print("Reading .tiff files ...")
@@ -27,82 +28,31 @@ def load_data(foldername):
 
 
 def process_layer(img):
+    # 1. Background & contrast
+    bg = cv.morphologyEx(img, cv.MORPH_TOPHAT,
+                        cv.getStructuringElement(cv.MORPH_ELLIPSE,(31,31)))
+    img_eq = exposure.equalize_adapthist(bg, clip_limit=0.01)
+    img_eq = filters.median(img_eq)
 
-    #Denoise
-    denoised = cv.medianBlur(img, 3)
+    # 2a. Multi-scale LoG
+    sigmas   = np.arange(0.5, 1.5, 0.1)
+    log_resp = np.zeros_like(img_eq)
+    for s in sigmas:
+        log_resp = np.maximum(log_resp,
+                            s**2 * np.abs(filters.laplace(filters.gaussian(img_eq, s))))
 
-    #Difference of Gaussians (DoG)
-    g_small = cv.GaussianBlur(denoised, (7, 7), 0)
-    g_large = cv.GaussianBlur(denoised, (11, 11), 0)
-    dog = cv.subtract(g_small, g_large)
+    #loc th
+    combo = log_resp > np.percentile(log_resp, 85)
 
-    #Normalize DoG to [0, 255]
-    dog = cv.normalize(dog, None, 0, 255, cv.NORM_MINMAX).astype(np.uint8)
+    th      = filters.threshold_sauvola(img_eq, window_size=11, k=0.12)
+    mask_in = np.logical_and(combo, img_eq > th)
 
-    #Adaptive Threshold
-    thresh = cv.adaptiveThreshold(
-        dog, 255,
-        cv.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv.THRESH_BINARY,
-        9,   # blockSize
-        3     # constant subtracted from mean
-    )
+    #morph
+    mask = morphology.remove_small_objects(mask_in, 15)       # area in px²
+    mask = morphology.remove_small_holes(mask, 20)
+    mask = morphology.binary_opening(mask, morphology.disk(1))
 
-    #Morphological Opening
-    kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, (3, 3))
-    opened = cv.morphologyEx(thresh, cv.MORPH_OPEN, kernel)
-
-
-    #Connected-component analysis
-    num_labels, labels, stats, centroids = cv.connectedComponentsWithStats(opened, connectivity=4)
-
-    #Area params
-    min_size = 15
-    max_size = 50
-
-    #Intensity param
-    intensity_threshold = 1000
-
-    #convexity param
-    convexity_threshold = 0.95
-
-    #Filter by size and intensity
-    for label_idx in range(1, num_labels):
-        area = stats[label_idx, cv.CC_STAT_AREA]
-        if area < min_size or area > max_size:
-            opened[labels == label_idx] = 0
-        else:
-            mask = (labels == label_idx)
-            component_mean = np.mean(img[mask])
-
-            if component_mean < intensity_threshold:
-                opened[mask] = 0
-
-    #opened = cv.morphologyEx(opened, cv.MORPH_OPEN, kernel)
-
-    #convexity filter
-    # for label_idx in range(1, num_labels):
-    #     component_mask = (labels == label_idx).astype(np.uint8) * 255
-
-    #     contours, _ = cv.findContours(component_mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
-    #     if not contours:
-    #         continue
-
-    #     contour = max(contours, key=cv.contourArea)
-    #     contour_area = cv.contourArea(contour)
-        
-    #     hull = cv.convexHull(contour)
-    #     hull_area = cv.contourArea(hull)
-        
-    #     if hull_area == 0:
-    #         continue
-        
-    #     convexity = contour_area / hull_area
-        
-    #     if convexity < convexity_threshold:
-    #         opened[labels == label_idx] = 0
-
-    return opened
+    return mask.astype(np.uint8)
 
 
 
@@ -121,36 +71,38 @@ def multi_stage(stack, print_per_layer=False):
         if print_per_layer:
             print(f"Orientation 0, slice {idx}: {num_labels - 1} components detected")
 
-    # Orientation 1:
-    stack_o1 = np.transpose(original_stack, (1, 0, 2))
-    for idx in range(stack_o1.shape[0]):
-        processed_layer = process_layer(stack_o1[idx])
+    # # Orientation 1:
+    # stack_o1 = np.transpose(original_stack, (1, 0, 2))
+    # for idx in range(stack_o1.shape[0]):
+    #     processed_layer = process_layer(stack_o1[idx])
 
-        output_data[:, idx, :] += processed_layer
+    #     output_data[:, idx, :] += processed_layer
 
-        num_labels, _, _, _ = cv.connectedComponentsWithStats(processed_layer, connectivity=8)
-        if print_per_layer:
-            print(f"Orientation 1, slice {idx}: {num_labels - 1} components detected")
+    #     num_labels, _, _, _ = cv.connectedComponentsWithStats(processed_layer, connectivity=8)
+    #     if print_per_layer:
+    #         print(f"Orientation 1, slice {idx}: {num_labels - 1} components detected")
 
-    # Orientation 2:
-    stack_o2 = np.transpose(original_stack, (2, 1, 0))
-    for idx in range(stack_o2.shape[0]):
-        processed_layer = process_layer(stack_o2[idx])
+    # # Orientation 2:
+    # stack_o2 = np.transpose(original_stack, (2, 1, 0))
+    # for idx in range(stack_o2.shape[0]):
+    #     processed_layer = process_layer(stack_o2[idx])
 
-        processed_layer = np.transpose(processed_layer)
-        output_data[:, :, idx] += processed_layer
+    #     processed_layer = np.transpose(processed_layer)
+    #     output_data[:, :, idx] += processed_layer
 
-        num_labels, _, _, _ = cv.connectedComponentsWithStats(processed_layer, connectivity=8)
-        if print_per_layer:
-            print(f"Orientation 2, slice {idx}: {num_labels - 1} components detected")
+    #     num_labels, _, _, _ = cv.connectedComponentsWithStats(processed_layer, connectivity=8)
+    #     if print_per_layer:
+    #         print(f"Orientation 2, slice {idx}: {num_labels - 1} components detected")
     
-    binary_output = output_data > 0
+    binary_output = output_data >= 1
 
     #opening
-    structure = np.ones((3, 3, 3))
-    opened_data = scipy.ndimage.binary_opening(binary_output, structure=structure)
+    e_structure = np.ones((3, 3, 3))
+    d_structure = np.ones((3, 3, 3))
+    opened_data = scipy.ndimage.binary_erosion(binary_output, structure=e_structure)
+    opened_data = scipy.ndimage.binary_dilation(opened_data, structure=d_structure)
     
-    return opened_data.astype(np.uint8)
+    return opened_data
 
 
 
